@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -58,8 +60,9 @@ private val scheme = darkColorScheme(
 private val toolRe = Regex("<tool>.*?</tool>", RegexOption.DOT_MATCHES_ALL)
 
 private val suggestions = listOf(
+    "Cek channel airdrop yang kupantau, pilah mana yang aman, lalu kerjakan yang bisa",
+    "Ingat emailku: (tulis emailmu di sini)",
     "Cari berita teknologi terbaru dan ringkas jadi 5 poin",
-    "Bandingkan 3 HP terbaik di bawah 3 juta",
     "Bantu aku bikin rencana belajar coding 2 minggu",
     "Ingat ya: aku suka jawaban yang singkat"
 )
@@ -74,6 +77,9 @@ private fun callLabel(c: Call): String = when (c.name) {
     "plan" -> "menyusun rencana"
     "remember" -> "menyimpan ke memory"
     "ask" -> "meminta izin"
+    "telegram_read" -> "membaca @" + c.args.optString("channel").removePrefix("@")
+    "telegram_post" -> "menyiapkan posting"
+    "playbook" -> "playbook " + domainOf(c.args.optString("domain"))
     else -> c.name
 }
 
@@ -240,7 +246,8 @@ fun App(st: Store) {
         val now = SimpleDateFormat("EEEE, d MMMM yyyy HH:mm", Locale("id", "ID")).format(Date())
         val memBlock = if (mem.isEmpty()) "" else
             "\n\nYANG KAMU INGAT TENTANG PENGGUNA:\n" + mem.joinToString("\n") { "- $it" }
-        val sys = b.prompt + "\n\nSekarang: $now." + memBlock + if (useTools) Agent.PROMPT else ""
+        val tgBlock = "\n\nCHANNEL TELEGRAM:\n- Channel yang dipantau: ${st.watch}\n- Channel milik pengguna (tujuan posting): ${st.tgChat}"
+        val sys = b.prompt + "\n\nSekarang: $now." + memBlock + if (useTools) tgBlock + Agent.PROMPT else ""
         scope.launch {
             var steps = 0
             while (true) {
@@ -270,8 +277,8 @@ fun App(st: Store) {
                 if (stop.get() || !useTools) break
                 val call = Agent.parse(finalText) ?: break
                 steps++
-                if (steps > 25) {
-                    msgs.add(Msg("tool", "Batas 25 langkah tercapai, agent berhenti."))
+                if (steps > 40) {
+                    msgs.add(Msg("tool", "Batas 40 langkah tercapai, agent berhenti."))
                     break
                 }
                 val res: String = when (call.name) {
@@ -296,7 +303,37 @@ fun App(st: Store) {
                         if (d.await()) "Pengguna MENGIZINKAN aksi itu."
                         else "Pengguna MENOLAK. Jangan lakukan aksi itu, tanyakan apa yang dia mau."
                     }
-                    else -> browser.run(call.name, call.args)
+                    "telegram_read" -> withContext(Dispatchers.IO) {
+                        Tg.read(call.args.optString("channel"), call.args.optInt("limit", 8))
+                    }
+                    "telegram_post" -> {
+                        val txt = call.args.optString("text").trim()
+                        if (txt.isEmpty()) {
+                            "Teks kosong."
+                        } else {
+                            val d = CompletableDeferred<Boolean>()
+                            pending = ("Posting ke ${st.tgChat}:\n\n" + txt.take(600)) to d
+                            if (d.await()) withContext(Dispatchers.IO) { Tg.post(st.tgToken, st.tgChat, txt) }
+                            else "Pengguna MENOLAK posting itu."
+                        }
+                    }
+                    "playbook" -> {
+                        val act = call.args.optString("action", "get")
+                        val dom = domainOf(call.args.optString("domain"))
+                        if (dom.isEmpty()) {
+                            "Domain kosong."
+                        } else if (act == "save") {
+                            st.savePlaybook(dom, call.args.optString("notes"))
+                            "Playbook $dom tersimpan."
+                        } else {
+                            st.getPlaybook(dom) ?: "Belum ada playbook untuk $dom."
+                        }
+                    }
+                    else -> {
+                        val r = browser.run(call.name, call.args)
+                        val pb = if (call.name == "open") st.getPlaybook(domainOf(call.args.optString("url"))) else null
+                        if (pb != null) r + "\n\n[PLAYBOOK " + domainOf(call.args.optString("url")) + "]\n" + pb else r
+                    }
                 }
                 msgs.add(Msg("tool", "[HASIL_TOOL] ${call.name}\n$res"))
                 if (stop.get()) break
@@ -520,19 +557,39 @@ fun App(st: Store) {
         var base by remember { mutableStateOf(st.base) }
         var key by remember { mutableStateOf(st.key) }
         var model by remember { mutableStateOf(st.model) }
+        var tgToken by remember { mutableStateOf(st.tgToken) }
+        var tgChat by remember { mutableStateOf(st.tgChat) }
+        var watch by remember { mutableStateOf(st.watch) }
         AlertDialog(
             onDismissRequest = { showSet = false },
             title = { Text("Pengaturan") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     OutlinedTextField(base, { base = it }, label = { Text("Base URL") }, singleLine = true)
                     OutlinedTextField(key, { key = it }, label = { Text("API Key") }, singleLine = true)
                     OutlinedTextField(model, { model = it }, label = { Text("Model") }, singleLine = true)
+                    HorizontalDivider()
+                    Text("Telegram", fontWeight = FontWeight.Bold)
+                    OutlinedTextField(
+                        watch, { watch = it }, label = { Text("Channel dipantau (pisah koma)") }
+                    )
+                    OutlinedTextField(
+                        tgChat, { tgChat = it }, label = { Text("Channel milikku (tujuan posting)") },
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        tgToken, { tgToken = it }, label = { Text("Token bot (dari @BotFather)") },
+                        singleLine = true
+                    )
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
                     st.base = base.trim(); st.key = key.trim(); st.model = model.trim()
+                    st.watch = watch.trim(); st.tgChat = tgChat.trim(); st.tgToken = tgToken.trim()
                     showSet = false
                 }) { Text("Simpan") }
             },

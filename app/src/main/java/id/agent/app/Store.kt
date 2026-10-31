@@ -46,6 +46,29 @@ class Store(c: Context) {
         get() = p.getString("botId", "nova")!!
         set(v) { p.edit().putString("botId", v).apply() }
 
+    var tgToken: String
+        get() = p.getString("tgToken", "")!!
+        set(v) { p.edit().putString("tgToken", v).apply() }
+    var tgChat: String
+        get() = p.getString("tgChat", "@Genairdrop")!!
+        set(v) { p.edit().putString("tgChat", v).apply() }
+    var watch: String
+        get() = p.getString("watch", "@airdropfind, @airdropnexgenid, @uangdroid28")!!
+        set(v) { p.edit().putString("watch", v).apply() }
+
+    private fun pbObj(): JSONObject = try { JSONObject(p.getString("playbooks", "{}")) } catch (_: Exception) { JSONObject() }
+
+    fun getPlaybook(domain: String): String? = pbObj().optString(domain, "").ifBlank { null }
+
+    fun savePlaybook(domain: String, notes: String) {
+        val o = pbObj()
+        o.put(domain, notes.take(1500))
+        while (o.length() > 100) o.remove(o.keys().next())
+        p.edit().putString("playbooks", o.toString()).apply()
+    }
+
+    fun playbookDomains(): List<String> = pbObj().keys().asSequence().toList()
+
     fun loadBots(): List<Bot> {
         val l = try {
             val a = JSONArray(p.getString("bots", "[]"))

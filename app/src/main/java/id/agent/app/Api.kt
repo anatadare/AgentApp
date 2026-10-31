@@ -27,7 +27,7 @@ object Api {
         history.forEachIndexed { i, m ->
             val role = if (m.role == "tool") "user" else m.role
             // hasil tool lama dipangkas supaya konteks tidak membengkak
-            val c = if (m.role == "tool" && i < history.size - 2) m.content.take(300) + "…" else m.content
+            val c = if (m.role == "tool" && i < history.size - 2) m.content.take(1200) + "…" else m.content
             msgs.put(JSONObject().put("role", role).put("content", c))
         }
         val body = JSONObject()
