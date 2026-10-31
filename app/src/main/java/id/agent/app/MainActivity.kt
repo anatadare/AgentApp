@@ -3,41 +3,179 @@ package id.agent.app
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
-val personas = listOf(
-    "Asisten" to "Kamu asisten AI yang cerdas dan membantu. Jawab dalam bahasa yang dipakai pengguna, ringkas dan jelas.",
-    "Riset" to "Kamu agent riset. Pecah pertanyaan jadi langkah, kumpulkan info dari beberapa sumber, beri kesimpulan dan sebutkan ketidakpastian.",
-    "Roleplay" to "Kamu bermain peran sebagai karakter yang diminta pengguna. Tetap dalam karakter, kreatif, dan responsif.",
-    "Coder" to "Kamu asisten pemrograman. Beri kode yang benar dan ringkas, jelaskan seperlunya."
+private val Ink = Color(0xFF0E0D16)
+private val Panel = Color(0xFF1B1928)
+private val Violet = Color(0xFF8B7CFF)
+
+private val scheme = darkColorScheme(
+    primary = Violet,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF3A2F8F),
+    onPrimaryContainer = Color(0xFFEAE6FF),
+    secondaryContainer = Color(0xFF26233A),
+    onSecondaryContainer = Color(0xFFE3DFF5),
+    background = Ink,
+    onBackground = Color(0xFFECE9F7),
+    surface = Ink,
+    onSurface = Color(0xFFECE9F7),
+    surfaceVariant = Panel,
+    onSurfaceVariant = Color(0xFFB4AFCB)
 )
+
+private val toolRe = Regex("<tool>.*?</tool>", RegexOption.DOT_MATCHES_ALL)
+
+private val suggestions = listOf(
+    "Cari berita teknologi terbaru dan ringkas jadi 5 poin",
+    "Bandingkan 3 HP terbaik di bawah 3 juta",
+    "Bantu aku bikin rencana belajar coding 2 minggu",
+    "Ingat ya: aku suka jawaban yang singkat"
+)
+
+private fun callLabel(c: Call): String = when (c.name) {
+    "open" -> "membuka " + c.args.optString("url").removePrefix("https://").removePrefix("http://").take(40)
+    "read" -> "membaca halaman"
+    "click" -> "klik elemen " + c.args.optInt("id")
+    "type" -> "mengetik “" + c.args.optString("text").take(30) + "”"
+    "scroll" -> "scroll halaman"
+    "back" -> "kembali"
+    "plan" -> "menyusun rencana"
+    "remember" -> "menyimpan ke memory"
+    "ask" -> "meminta izin"
+    else -> c.name
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val st = Store(this)
-        setContent { MaterialTheme(colorScheme = darkColorScheme()) { App(st) } }
+        setContent { MaterialTheme(colorScheme = scheme) { App(st) } }
+    }
+}
+
+@Composable
+fun Avatar(emoji: String, size: Int = 32) {
+    Box(
+        Modifier.size(size.dp).clip(CircleShape)
+            .background(Brush.linearGradient(listOf(Color(0xFF5B4BD6), Color(0xFF2BB5A0)))),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(emoji, fontSize = (size * 0.5).sp)
+    }
+}
+
+@Composable
+fun MsgView(m: Msg, bot: Bot, typing: Boolean, dots: String) {
+    val dim = MaterialTheme.colorScheme.onSurfaceVariant
+    when (m.role) {
+        "tool" -> {
+            if (m.content.startsWith("[HASIL_TOOL] plan")) {
+                val steps = m.content.lines().drop(1).filter { it.isNotBlank() }
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    modifier = Modifier.fillMaxWidth().padding(start = 40.dp)
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("📋 Rencana", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        steps.forEach { Text(it, fontSize = 13.sp) }
+                    }
+                }
+            } else {
+                val s = m.content.lineSequence().firstOrNull { it.startsWith("URL: ") }
+                    ?.removePrefix("URL: ")?.take(60)
+                    ?: m.content.lines().getOrNull(1)?.take(80) ?: ""
+                if (s.isNotBlank()) {
+                    Text("↳ $s", fontSize = 11.sp, color = dim, modifier = Modifier.padding(start = 40.dp))
+                }
+            }
+        }
+        "assistant" -> {
+            val call = Agent.parse(m.content)
+            val text = toolRe.replace(m.content, "").substringBefore("<tool>").trim()
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+                Avatar(bot.emoji)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.weight(1f, fill = false)) {
+                    if (text.isNotEmpty() || call == null) {
+                        Surface(
+                            shape = RoundedCornerShape(4.dp, 18.dp, 18.dp, 18.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant
+                        ) {
+                            SelectionContainer {
+                                Text(
+                                    if (text.isEmpty()) (if (typing) dots else "…") else text,
+                                    Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                    fontSize = 15.sp
+                                )
+                            }
+                        }
+                    }
+                    if (call != null) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer
+                        ) {
+                            Text(
+                                "▸ " + callLabel(call),
+                                Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                fontSize = 12.sp, color = Violet
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        else -> {
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                Surface(
+                    shape = RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp),
+                    color = Color.Transparent,
+                    modifier = Modifier.widthIn(max = 300.dp)
+                ) {
+                    Box(Modifier.background(Brush.linearGradient(listOf(Color(0xFF6C5CE7), Color(0xFF8E6CFF))))) {
+                        SelectionContainer {
+                            Text(
+                                m.content,
+                                Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                color = Color.White, fontSize = 15.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -46,23 +184,51 @@ class MainActivity : ComponentActivity() {
 fun App(st: Store) {
     val ctx = LocalContext.current
     val browser = remember { Browser(ctx) }
-    val msgs = remember { mutableStateListOf<Msg>().also { it.addAll(st.loadChat()) } }
+    var bots by remember { mutableStateOf(st.loadBots()) }
+    var botId by remember { mutableStateOf(st.botId) }
+    val bot = bots.firstOrNull { it.id == botId } ?: bots.first()
+    val msgs = remember { mutableStateListOf<Msg>().also { it.addAll(st.loadChat(st.botId)) } }
+    val mem = remember { mutableStateListOf<String>().also { it.addAll(st.loadMemory()) } }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var showSet by remember { mutableStateOf(false) }
-    var pIdx by remember { mutableStateOf(st.personaIdx) }
+    var showMem by remember { mutableStateOf(false) }
     var agentOn by remember { mutableStateOf(st.agentOn) }
+    var showBrowser by remember { mutableStateOf(true) }
     var menu by remember { mutableStateOf(false) }
+    var more by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<Bot?>(null) }
+    var editingNew by remember { mutableStateOf(false) }
+    var pending by remember { mutableStateOf<Pair<String, CompletableDeferred<Boolean>>?>(null) }
+    var dots by remember { mutableStateOf("•") }
     val stop = remember { AtomicBoolean(false) }
     val scope = rememberCoroutineScope()
     val list = rememberLazyListState()
+
+    val typing = busy && msgs.lastOrNull()?.let { it.role == "assistant" && it.content.isEmpty() } == true
+
+    LaunchedEffect(busy) {
+        while (busy) {
+            dots = when (dots) { "•" -> "••"; "••" -> "•••"; else -> "•" }
+            delay(350)
+        }
+    }
 
     LaunchedEffect(msgs.size, msgs.lastOrNull()?.content) {
         if (msgs.isNotEmpty()) list.scrollToItem(msgs.lastIndex)
     }
 
-    fun send() {
-        val t = input.trim()
+    fun switchBot(id: String) {
+        if (busy || id == botId) return
+        st.saveChat(botId, msgs)
+        botId = id
+        st.botId = id
+        msgs.clear()
+        msgs.addAll(st.loadChat(id))
+    }
+
+    fun send(raw: String) {
+        val t = raw.trim()
         if (t.isEmpty() || busy) return
         if (st.key.isBlank()) { showSet = true; return }
         input = ""
@@ -70,7 +236,11 @@ fun App(st: Store) {
         busy = true
         stop.set(false)
         val useTools = agentOn
-        val sys = personas[pIdx].second + if (useTools) Agent.PROMPT else ""
+        val b = bot
+        val now = SimpleDateFormat("EEEE, d MMMM yyyy HH:mm", Locale("id", "ID")).format(Date())
+        val memBlock = if (mem.isEmpty()) "" else
+            "\n\nYANG KAMU INGAT TENTANG PENGGUNA:\n" + mem.joinToString("\n") { "- $it" }
+        val sys = b.prompt + "\n\nSekarang: $now." + memBlock + if (useTools) Agent.PROMPT else ""
         scope.launch {
             var steps = 0
             while (true) {
@@ -100,15 +270,40 @@ fun App(st: Store) {
                 if (stop.get() || !useTools) break
                 val call = Agent.parse(finalText) ?: break
                 steps++
-                if (steps > 10) {
-                    msgs.add(Msg("tool", "Batas 10 langkah tercapai, agent berhenti."))
+                if (steps > 25) {
+                    msgs.add(Msg("tool", "Batas 25 langkah tercapai, agent berhenti."))
                     break
                 }
-                val res = browser.run(call.name, call.args)
+                val res: String = when (call.name) {
+                    "remember" -> {
+                        val x = call.args.optString("text").trim()
+                        if (x.isNotEmpty() && x !in mem) {
+                            mem.add(x)
+                            if (mem.size > 50) mem.removeAt(0)
+                            st.saveMemory(mem)
+                        }
+                        "Tersimpan di memory."
+                    }
+                    "plan" -> {
+                        val a = call.args.optJSONArray("steps")
+                        val items: List<String> =
+                            if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
+                        items.mapIndexed { i, s -> "${i + 1}. $s" }.joinToString("\n")
+                    }
+                    "ask" -> {
+                        val d = CompletableDeferred<Boolean>()
+                        pending = call.args.optString("question", "Lanjutkan?") to d
+                        if (d.await()) "Pengguna MENGIZINKAN aksi itu."
+                        else "Pengguna MENOLAK. Jangan lakukan aksi itu, tanyakan apa yang dia mau."
+                    }
+                    else -> browser.run(call.name, call.args)
+                }
                 msgs.add(Msg("tool", "[HASIL_TOOL] ${call.name}\n$res"))
+                if (stop.get()) break
             }
+            msgs.removeAll { it.role == "assistant" && it.content.isBlank() }
             busy = false
-            st.saveChat(msgs)
+            st.saveChat(b.id, msgs)
         }
     }
 
@@ -118,25 +313,43 @@ fun App(st: Store) {
             TopAppBar(
                 title = {
                     Box {
-                        TextButton(onClick = { menu = true }) { Text("🤖 ${personas[pIdx].first} ▾") }
+                        TextButton(onClick = { menu = true }) {
+                            Text("${bot.emoji}  ${bot.name} ▾", fontWeight = FontWeight.Bold)
+                        }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            personas.forEachIndexed { i, p ->
-                                DropdownMenuItem(text = { Text(p.first) }, onClick = {
-                                    pIdx = i; st.personaIdx = i; menu = false
-                                })
+                            bots.forEach { x ->
+                                DropdownMenuItem(
+                                    text = { Text("${x.emoji}  ${x.name}") },
+                                    onClick = { menu = false; switchBot(x.id) }
+                                )
                             }
+                            HorizontalDivider()
+                            DropdownMenuItem(text = { Text("＋ Bot baru") }, onClick = {
+                                menu = false; editingNew = true
+                                editing = Bot("", "", "🤖", "Kamu asisten AI yang membantu. Jawab dalam bahasa pengguna.")
+                            })
+                            DropdownMenuItem(text = { Text("✎ Edit bot ini") }, onClick = {
+                                menu = false; editingNew = false; editing = bot
+                            })
                         }
                     }
                 },
                 actions = {
                     TextButton(onClick = { agentOn = !agentOn; st.agentOn = agentOn }, enabled = !busy) {
-                        Text(if (agentOn) "🌐 ON" else "🌐 OFF")
+                        Text(if (agentOn) "🛠 ON" else "🛠 OFF", fontSize = 13.sp)
                     }
-                    IconButton(onClick = { msgs.clear(); st.saveChat(msgs) }, enabled = !busy) {
-                        Icon(Icons.Default.Delete, "Hapus chat")
-                    }
-                    IconButton(onClick = { showSet = true }) {
-                        Icon(Icons.Default.Settings, "Pengaturan")
+                    TextButton(onClick = { showBrowser = !showBrowser }) { Text("🌐", fontSize = 16.sp) }
+                    TextButton(onClick = { showMem = true }) { Text("🧠", fontSize = 16.sp) }
+                    Box {
+                        TextButton(onClick = { more = true }) { Text("⋮", fontSize = 18.sp) }
+                        DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
+                            DropdownMenuItem(text = { Text("Hapus chat") }, enabled = !busy, onClick = {
+                                more = false; msgs.clear(); st.saveChat(botId, msgs)
+                            })
+                            DropdownMenuItem(text = { Text("Pengaturan") }, onClick = {
+                                more = false; showSet = true
+                            })
+                        }
                     }
                 }
             )
@@ -149,57 +362,158 @@ fun App(st: Store) {
                 OutlinedTextField(
                     value = input, onValueChange = { input = it },
                     modifier = Modifier.weight(1f), maxLines = 4,
-                    placeholder = { Text("Tulis tugas / pesan…") }
+                    shape = RoundedCornerShape(24.dp),
+                    placeholder = { Text("Suruh ${bot.name} melakukan sesuatu…") }
                 )
                 Spacer(Modifier.width(8.dp))
-                FilledIconButton(onClick = { if (busy) stop.set(true) else send() }) {
+                FilledIconButton(onClick = {
+                    if (busy) { stop.set(true); pending?.second?.complete(false); pending = null } else send(input)
+                }) {
                     if (busy) Text("■") else Icon(Icons.Default.Send, "Kirim")
                 }
             }
         }
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
-            if (agentOn) {
-                AndroidView(
-                    factory = { browser.web },
-                    modifier = Modifier.fillMaxWidth().weight(0.45f)
-                )
-            }
-            LazyColumn(
-                state = list,
-                modifier = Modifier.fillMaxWidth().weight(if (agentOn) 0.55f else 1f),
-                contentPadding = PaddingValues(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(msgs.size) { i ->
-                    val m = msgs[i]
-                    val mine = m.role == "user"
-                    if (m.role == "tool") {
-                        Text(
-                            "🔧 " + m.content.take(220) + if (m.content.length > 220) "…" else "",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    } else {
-                        Box(
-                            Modifier.fillMaxWidth(),
-                            contentAlignment = if (mine) Alignment.CenterEnd else Alignment.CenterStart
+            if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            val bm = if (agentOn && showBrowser)
+                Modifier.fillMaxWidth().weight(0.4f).padding(horizontal = 8.dp).clip(RoundedCornerShape(14.dp))
+            else Modifier.size(1.dp)
+            AndroidView(factory = { browser.web }, modifier = bm)
+
+            if (msgs.isEmpty()) {
+                Column(
+                    Modifier.fillMaxWidth().weight(1f).padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Avatar(bot.emoji, 72)
+                    Spacer(Modifier.height(12.dp))
+                    Text("Halo, aku ${bot.name}", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Kasih aku tugas, nanti kukerjakan sendiri di browser.",
+                        fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    suggestions.forEach { s ->
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                .clip(RoundedCornerShape(14.dp)).clickable { send(s) }
                         ) {
-                            Surface(
-                                shape = RoundedCornerShape(16.dp),
-                                color = if (mine) MaterialTheme.colorScheme.primaryContainer
-                                else MaterialTheme.colorScheme.surfaceVariant,
-                                modifier = Modifier.widthIn(max = 320.dp)
-                            ) {
-                                SelectionContainer {
-                                    Text(m.content.ifEmpty { "…" }, Modifier.padding(12.dp))
-                                }
-                            }
+                            Text(s, Modifier.padding(14.dp), fontSize = 14.sp)
                         }
+                    }
+                }
+            } else {
+                LazyColumn(
+                    state = list,
+                    modifier = Modifier.fillMaxWidth().weight(if (agentOn && showBrowser) 0.6f else 1f),
+                    contentPadding = PaddingValues(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(msgs.size) { i ->
+                        MsgView(msgs[i], bot, typing && i == msgs.lastIndex, dots)
                     }
                 }
             }
         }
+    }
+
+    pending?.let { pq ->
+        AlertDialog(
+            onDismissRequest = { pq.second.complete(false); pending = null },
+            title = { Text("${bot.name} minta izin") },
+            text = { Text(pq.first) },
+            confirmButton = {
+                TextButton(onClick = { pq.second.complete(true); pending = null }) { Text("Izinkan") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pq.second.complete(false); pending = null }) { Text("Tolak") }
+            }
+        )
+    }
+
+    if (showMem) {
+        AlertDialog(
+            onDismissRequest = { showMem = false },
+            title = { Text("🧠 Memory") },
+            text = {
+                if (mem.isEmpty()) {
+                    Text("Belum ada. Agent akan menyimpan hal penting tentangmu di sini, atau minta saja: “ingat bahwa …”.")
+                } else {
+                    LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                        items(mem.size) { i ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("• " + mem[i], Modifier.weight(1f), fontSize = 14.sp)
+                                TextButton(onClick = { mem.removeAt(i); st.saveMemory(mem) }) { Text("✕") }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showMem = false }) { Text("Tutup") } },
+            dismissButton = {
+                if (mem.isNotEmpty()) {
+                    TextButton(onClick = { mem.clear(); st.saveMemory(mem) }) { Text("Hapus semua") }
+                }
+            }
+        )
+    }
+
+    editing?.let { eb ->
+        var emoji by remember(eb) { mutableStateOf(eb.emoji) }
+        var name by remember(eb) { mutableStateOf(eb.name) }
+        var prompt by remember(eb) { mutableStateOf(eb.prompt) }
+        AlertDialog(
+            onDismissRequest = { editing = null },
+            title = { Text(if (editingNew) "Bot baru" else "Edit bot") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(emoji, { emoji = it.take(4) }, label = { Text("Emoji") }, singleLine = true)
+                    OutlinedTextField(name, { name = it }, label = { Text("Nama") }, singleLine = true)
+                    OutlinedTextField(
+                        prompt, { prompt = it }, label = { Text("Kepribadian / instruksi") },
+                        minLines = 4, maxLines = 8
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (name.isNotBlank()) {
+                        val nb = Bot(
+                            if (editingNew) System.currentTimeMillis().toString() else eb.id,
+                            name.trim(), emoji.ifBlank { "🤖" }, prompt.trim()
+                        )
+                        bots = if (editingNew) bots + nb else bots.map { if (it.id == nb.id) nb else it }
+                        st.saveBots(bots)
+                        editing = null
+                        if (editingNew) switchBot(nb.id)
+                    }
+                }) { Text("Simpan") }
+            },
+            dismissButton = {
+                Row {
+                    if (!editingNew && bots.size > 1) {
+                        TextButton(onClick = {
+                            val id = eb.id
+                            editing = null
+                            if (!busy) {
+                                bots = bots.filter { it.id != id }
+                                st.saveBots(bots)
+                                st.deleteChat(id)
+                                botId = bots.first().id
+                                st.botId = botId
+                                msgs.clear()
+                                msgs.addAll(st.loadChat(botId))
+                            }
+                        }) { Text("Hapus") }
+                    }
+                    TextButton(onClick = { editing = null }) { Text("Batal") }
+                }
+            }
+        )
     }
 
     if (showSet) {

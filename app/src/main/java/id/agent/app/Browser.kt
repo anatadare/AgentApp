@@ -99,6 +99,7 @@ e.scrollIntoView(); e.click(); return 'ok';
         private const val TYPE = """(function(i,t,en){
 var e=document.querySelector('[data-ai="'+i+'"]');
 if(!e) return 'elemen tidak ada';
+if(e.type==='password') return 'DIBLOKIR: tidak boleh mengisi password. Minta pengguna melakukannya sendiri.';
 e.focus();
 var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(e),'value');
 if(d&&d.set) d.set.call(e,t); else e.value=t;
